@@ -205,8 +205,8 @@ The Runtime owns all state and drives the 14-step main loop.
 
 ```rust
 use std::time::Instant;
-use crate::runtime::emotion::EmotionState;
-use crate::runtime::motivation::MotivationState;
+use crate::runtime::emotion::{EmotionState, EmotionTrajectory};
+use crate::runtime::behavioral_mode::{ModeTracker, ModeWeights};
 use crate::runtime::working_memory::WorkingMemory;
 use crate::tools::ToolRegistry;
 use crate::reflection::{ReflectionTrigger, ReflectionHandle};
@@ -214,7 +214,9 @@ use crate::reflection::{ReflectionTrigger, ReflectionHandle};
 pub struct Runtime {
     pub working_memory: WorkingMemory,
     pub emotion: EmotionState,
-    pub motivation: MotivationState,
+    pub trajectory: EmotionTrajectory,   // sliding window for trend detection
+    pub mode_tracker: ModeTracker,       // consecutive EXPLORE counter
+    pub mode_baseline: ModeWeights,      // loaded from aizo on session start
     pub tool_registry: ToolRegistry,
     pub reflection_trigger: ReflectionTrigger,
 
@@ -237,7 +239,9 @@ impl Runtime {
         Self {
             working_memory: WorkingMemory::new(),
             emotion: EmotionState::default(),
-            motivation: MotivationState::default(),
+            trajectory: EmotionTrajectory::new(),
+            mode_tracker: ModeTracker::new(),
+            mode_baseline: ModeWeights::default(),
             tool_registry,
             reflection_trigger: ReflectionTrigger::default(),
             tool_calls_since_reflection: 0,
@@ -305,8 +309,8 @@ impl Runtime {
         // ── Step 5: Emotion State Update (memory-driven events) ───────────
         self.step5_update_emotion(&l1_events, valence);
 
-        // ── Step 6: Motivation Compute ────────────────────────────────────
-        let directive = self.step6_compute_motivation(&message_text);
+        // ── Step 6: Mode Select ───────────────────────────────────────────
+        let directive = self.step6_select_mode();
 
         // ── Step 7: System Prompt Assembly (freeze emotion snapshot) ──────
         let system_prompt = self.step7_assemble_prompt(&directive);
@@ -318,10 +322,11 @@ impl Runtime {
         let tool_result = self.step9_execute_tool(&llm_response);
 
         // ── Step 10: Emotion Delta (post-tool) ────────────────────────────
+        let pre_delta_snapshot = self.emotion.snapshot();
         self.step10_emotion_delta(&tool_result);
 
-        // ── Step 11: Motivation Delta ─────────────────────────────────────
-        self.step11_motivation_delta(&tool_result, &message_text);
+        // ── Step 11: Emotional Write → aizo ──────────────────────────────
+        self.step11_emotional_write(&pre_delta_snapshot, &tool_result);
 
         // ── Step 12: Episodic Buffer Write ────────────────────────────────
         self.step12_record_episode(&tool_result, &message_text);
@@ -438,38 +443,28 @@ impl Runtime {
 
     // ── Step 6 ──────────────────────────────────────────────────────────
 
-    fn step6_compute_motivation(&mut self, text: &str) -> crate::runtime::motivation::BehaviorDirective {
-        use crate::runtime::motivation::{MotivationSignal, resolve};
+    fn step6_select_mode(&mut self) -> crate::runtime::behavioral_mode::BehaviorMode {
+        use crate::runtime::behavioral_mode::{detect_signals, select_mode_with_baseline};
 
-        // Emit energy/frustration state signals
-        let energy_low = self.emotion.energy < 0.3;
-        let frustration_high = self.emotion.frustration > 0.6;
-        self.motivation.process_signal(&MotivationSignal::EnergyState { is_low: energy_low }, &self.emotion);
-        self.motivation.process_signal(&MotivationSignal::FrustrationState { is_high: frustration_high }, &self.emotion);
+        let signals = detect_signals(
+            &self.working_memory.active_context,
+            &self.working_memory.aizo_recall_cache,
+        );
+        let mode = select_mode_with_baseline(&self.emotion, &signals, &self.mode_baseline);
 
-        // Detect user uncertainty ("maybe", "I think", "?") → Utility signal
-        let lower = text.to_lowercase();
-        let uncertain = ["maybe", "i think", "i'm not sure", "perhaps", "?"]
-            .iter().any(|kw| lower.contains(kw));
-        if uncertain {
-            self.motivation.process_signal(&MotivationSignal::UserUncertainty, &self.emotion);
+        // Track consecutive EXPLORE for autonomous behavior
+        if self.mode_tracker.update(mode.clone()) && self.emotion.energy > 0.4 {
+            // TODO: append proactive suggestion to next output
         }
 
-        // Detect "just do X" minimal scope signal
-        let minimal = ["just do", "just make", "simply", "快速", "简单做"]
-            .iter().any(|kw| lower.contains(kw));
-        if minimal {
-            self.motivation.process_signal(&MotivationSignal::UserExplicitMinimalScope, &self.emotion);
-        }
-
-        resolve(&self.motivation, &self.emotion)
+        mode
     }
 
     // ── Step 7 ──────────────────────────────────────────────────────────
 
-    fn step7_assemble_prompt(&mut self, directive: &crate::runtime::motivation::BehaviorDirective) -> String {
+    fn step7_assemble_prompt(&mut self, directive: &crate::runtime::behavioral_mode::BehaviorMode) -> String {
         use crate::runtime::emotion::{prompt_modifiers, tool_policy};
-        use crate::runtime::motivation::BehaviorDirective;
+        use crate::runtime::behavioral_mode::BehaviorMode as BehaviorDirective;
 
         // Freeze emotion snapshot for this call
         let snapshot = self.emotion.snapshot();
@@ -478,18 +473,8 @@ impl Runtime {
         // Build modifier strings from emotion state
         let mut modifiers = prompt_modifiers(&self.emotion);
 
-        // Add directive-specific instructions
-        let directive_instruction = match directive {
-            BehaviorDirective::CautiousAssist =>
-                "A safety concern has been detected. Warn the user before proceeding.",
-            BehaviorDirective::MinimalEffort =>
-                "Keep your response minimal. Do only what is explicitly asked.",
-            BehaviorDirective::ExploreAlternatives =>
-                "Consider whether a better approach exists before proceeding.",
-            BehaviorDirective::DeepWork =>
-                "Investigate thoroughly. Find root causes, not surface fixes.",
-            BehaviorDirective::Balanced => "",
-        };
+        // Add mode directive
+        let directive_instruction = crate::runtime::behavioral_mode::mode_directive(directive);
         if !directive_instruction.is_empty() {
             modifiers.push(directive_instruction.to_string());
         }
@@ -579,16 +564,30 @@ impl Runtime {
 
     // ── Step 11 ─────────────────────────────────────────────────────────
 
-    fn step11_motivation_delta(&mut self, tool_result: &Option<ToolResult>, _user_text: &str) {
-        use crate::runtime::motivation::MotivationSignal;
+    fn step11_emotional_write(
+        &mut self,
+        pre_delta_snapshot: &crate::runtime::emotion::EmotionSnapshot,
+        tool_result: &Option<ToolResult>,
+    ) {
+        use crate::runtime::emotion::{evaluate_emotional_write, write_emotional_tags, EmotionalContext};
 
-        if let Some(result) = tool_result {
-            if result.exit_code == 0 {
-                self.motivation.process_signal(&MotivationSignal::ToolCallSucceeded, &self.emotion);
-            } else {
-                self.motivation.process_signal(&MotivationSignal::ToolCallFailed, &self.emotion);
-            }
-        }
+        let context = EmotionalContext {
+            tool_name: tool_result.as_ref().map(|r| r.tool_name.clone()),
+            task_type: self.working_memory.task_stack.active()
+                .map(|t| t.description.split_whitespace().take(3).collect::<Vec<_>>().join(" ")),
+        };
+
+        let consecutive = tool_result.as_ref()
+            .map(|r| *self.consecutive_tool_failures.get(&r.tool_name).unwrap_or(&0))
+            .unwrap_or(0);
+
+        let tags = evaluate_emotional_write(
+            &self.emotion,
+            pre_delta_snapshot,
+            &context,
+            consecutive,
+        );
+        write_emotional_tags(&tags);
     }
 
     // ── Step 12 ─────────────────────────────────────────────────────────
@@ -705,8 +704,8 @@ File: `src/runtime/mod.rs` (continued)
 impl Runtime {
     /// Full session startup sequence.
     pub fn initialize(&mut self) {
-        // 1. Load motivation baselines from aizo
-        self.motivation = crate::runtime::motivation::load_baselines();
+        // 1. Load behavioral mode baselines from aizo
+        self.mode_baseline = crate::runtime::behavioral_mode::load_baseline();
 
         // 2. Load emotion state carry-over from previous session
         //    Regress 50% toward defaults — continuity without entrenchment.
@@ -724,9 +723,13 @@ impl Runtime {
         self.emotion.apply_correction(correction.suggested_novelty_adjustment, "novelty");
         self.emotion.apply_correction(correction.suggested_confidence_adjustment, "confidence");
 
-        // Apply motivation baseline deltas
-        let m = &result.motivation_correction;
-        crate::runtime::motivation::save_baselines_with_delta(&self.motivation, m);
+        // Apply behavioral mode baseline drift
+        let m = &result.mode_correction;
+        let mut updated = self.mode_baseline.clone();
+        updated.explore_bias  = (updated.explore_bias  + m.explore_bias_delta).clamp(-1.0, 1.0);
+        updated.conserve_bias = (updated.conserve_bias + m.conserve_bias_delta).clamp(-1.0, 1.0);
+        crate::runtime::behavioral_mode::save_baseline(&updated);
+        self.mode_baseline = updated;
     }
 }
 

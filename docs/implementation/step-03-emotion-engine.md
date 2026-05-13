@@ -400,6 +400,238 @@ fn parse_event_json(raw: &serde_json::Value) -> Result<DetectedEvent, ()> {
 6. Delta values can be made configurable via a `[emotion_deltas]` section in a
    TOML config file without recompiling — `[TODO: config file path and format]`.
 
+### 3.9 Emotional Memory
+
+Implements spec §3.4. Evaluates after every emotion delta (main loop step 11)
+whether the current emotional state in its current context is worth writing to aizo.
+
+File: `src/runtime/emotion.rs` (continued)
+
+```rust
+/// Identifies the current context for emotional tagging.
+/// Extracted from the active task description and the most recent tool call.
+#[derive(Debug, Default)]
+pub struct EmotionalContext {
+    pub tool_name: Option<String>,
+    pub task_type: Option<String>,  // brief label extracted from task description
+}
+
+/// An emotional tag to be written to aizo.
+#[derive(Debug)]
+pub struct EmotionalTag {
+    pub category: String,
+    pub item: String,
+    pub reason: String,
+    pub score: f64,
+    pub keywords: Vec<String>,
+}
+
+/// Evaluate whether the current emotion state warrants writing emotional tags to aizo.
+/// prev is the snapshot taken before this turn's deltas were applied.
+pub fn evaluate_emotional_write(
+    state: &EmotionState,
+    prev: &EmotionSnapshot,
+    context: &EmotionalContext,
+    consecutive_failures: u32,
+) -> Vec<EmotionalTag> {
+    let mut tags = Vec::new();
+
+    // Frustration threshold crossed this turn (rising edge only)
+    if state.frustration > 0.7 && prev.frustration <= 0.7 {
+        if let Some(tool) = &context.tool_name {
+            tags.push(EmotionalTag {
+                category: "aversion".into(),
+                item: format!("{tool} emotionally taxing"),
+                reason: format!("frustration crossed 0.7 during {tool}"),
+                score: 3.0,
+                keywords: vec![tool.clone(), "frustration".into(), "taxing".into()],
+            });
+        }
+    }
+
+    // 3+ consecutive failures with the same tool
+    if consecutive_failures >= 3 {
+        if let Some(tool) = &context.tool_name {
+            tags.push(EmotionalTag {
+                category: "aversion".into(),
+                item: format!("{tool} repeated failure"),
+                reason: format!("{consecutive_failures} consecutive failures with {tool}"),
+                score: 2.0,
+                keywords: vec![tool.clone(), "failure".into(), "pattern".into()],
+            });
+        }
+    }
+
+    // High confidence at task completion → preference for that task type
+    if state.confidence > 0.8 && prev.confidence <= 0.8 {
+        if let Some(task_type) = &context.task_type {
+            tags.push(EmotionalTag {
+                category: "preference".into(),
+                item: format!("{task_type} confidence builder"),
+                reason: format!("confidence {:.2} reached during {task_type}", state.confidence),
+                score: 7.0,
+                keywords: vec![task_type.clone(), "confidence".into(), "success".into()],
+            });
+        }
+    }
+
+    tags
+}
+
+/// Write emotional tags to aizo. Called in main loop step 11.
+/// Silently drops on aizo failure — emotional tagging is best-effort.
+pub fn write_emotional_tags(tags: &[EmotionalTag]) {
+    for tag in tags {
+        crate::aizo_bridge::add(
+            &tag.category, &tag.item, &tag.reason,
+            tag.score, &tag.keywords,
+        ).ok();
+    }
+}
+```
+
+**How emotional priors work on recall:** Tags written above (e.g., "docker emotionally taxing"
+score=3) surface as aversion entries on the next `aizo recall "docker ..."`. The biased
+recall (§3.10) will also pull taboo entries when frustration is high, reinforcing the
+safety-first posture before any tool is called in that context.
+
+### 3.10 Emotion-Biased Recall
+
+Implements spec §3.5. The `step4_aizo_recall` function in the Runtime (step-00)
+calls `bias_recall_query` before every aizo query, so emotion state shapes retrieval
+on every turn.
+
+File: `src/runtime/emotion.rs` (continued)
+
+```rust
+/// Parameters controlling how aizo is queried based on current emotion state.
+pub struct BiasedRecallParams {
+    pub query: String,
+    pub min_weight: Option<f64>,     // restrict to entries above this weight
+    pub max_results: Option<usize>,  // cap total results
+    pub include_taboo: bool,         // also pull taboo category entries
+    pub include_low_weight: bool,    // include entries below normal recall floor
+}
+
+/// Produce biased recall parameters from emotion state and base query.
+pub fn bias_recall_query(base_query: &str, state: &EmotionState) -> BiasedRecallParams {
+    let mut params = BiasedRecallParams {
+        query: base_query.to_string(),
+        min_weight: None,
+        max_results: None,
+        include_taboo: false,
+        include_low_weight: false,
+    };
+
+    if state.frustration > 0.6 {
+        // Want safe / reliable results; also surface taboo as a safety net
+        params.query = format!("{base_query} safe reliable");
+        params.include_taboo = true;
+    }
+
+    if state.novelty > 0.7 {
+        // Exploring unknown ground: also include low-weight (unfamiliar) entries
+        params.include_low_weight = true;
+    }
+
+    if state.confidence < 0.3 {
+        // Only trust well-established memories
+        params.min_weight = Some(7.0);
+    }
+
+    if state.energy < 0.3 {
+        // Reduce cognitive load
+        params.max_results = Some(5);
+    }
+
+    params
+}
+```
+
+### 3.11 Emotional Trajectory
+
+Implements spec §3.6. A sliding window of the last 5 emotion snapshots. Adjusts
+prompt-modulation thresholds based on trend direction so the agent responds to
+momentum, not just current point-in-time readings.
+
+File: `src/runtime/emotion.rs` (continued)
+
+```rust
+use std::collections::VecDeque;
+
+const TRAJECTORY_WINDOW: usize = 5;
+
+/// Sliding window of recent emotion snapshots.
+pub struct EmotionTrajectory {
+    window: VecDeque<EmotionSnapshot>,
+}
+
+impl EmotionTrajectory {
+    pub fn new() -> Self {
+        Self { window: VecDeque::with_capacity(TRAJECTORY_WINDOW) }
+    }
+
+    pub fn push(&mut self, snapshot: EmotionSnapshot) {
+        if self.window.len() >= TRAJECTORY_WINDOW {
+            self.window.pop_front();
+        }
+        self.window.push_back(snapshot);
+    }
+
+    /// Linear regression slope over the window, normalized to [-1, 1].
+    fn trend(&self, extract: impl Fn(&EmotionSnapshot) -> f64) -> f64 {
+        if self.window.len() < 2 { return 0.0; }
+        let vals: Vec<f64> = self.window.iter().map(extract).collect();
+        let n = vals.len() as f64;
+        let sx: f64 = (0..vals.len()).map(|i| i as f64).sum();
+        let sy: f64 = vals.iter().sum();
+        let sxy: f64 = vals.iter().enumerate().map(|(i, y)| i as f64 * y).sum();
+        let sxx: f64 = (0..vals.len()).map(|i| (i as f64).powi(2)).sum();
+        let slope = (n * sxy - sx * sy) / (n * sxx - sx * sx);
+        slope.clamp(-1.0, 1.0)
+    }
+
+    pub fn frustration_trend(&self) -> f64 { self.trend(|s| s.frustration) }
+    pub fn confidence_trend(&self)  -> f64 { self.trend(|s| s.confidence) }
+    pub fn novelty_trend(&self)     -> f64 { self.trend(|s| s.novelty) }
+    pub fn energy_trend(&self)      -> f64 { self.trend(|s| s.energy) }
+
+    /// True when novelty and confidence are both rising — flow state.
+    pub fn is_flow_state(&self) -> bool {
+        self.novelty_trend() > 0.3 && self.confidence_trend() > 0.3
+    }
+}
+
+/// Trajectory-adjusted thresholds for prompt modulation.
+/// Rising frustration → triggers caution earlier.
+/// Rising confidence → allows decisiveness earlier.
+/// Flow state → suppresses all modifiers.
+pub struct AdjustedThresholds {
+    pub frustration_caution: f64,  // default 0.6, lower when frustration rising
+    pub confidence_low: f64,       // default 0.3, higher when confidence falling
+    pub flow_state: bool,          // suppress all modifiers when true
+}
+
+pub fn trajectory_adjusted_thresholds(
+    _state: &EmotionState,
+    traj: &EmotionTrajectory,
+) -> AdjustedThresholds {
+    AdjustedThresholds {
+        // Rising frustration tightens the caution threshold by up to 0.1
+        frustration_caution: 0.6 - (traj.frustration_trend().max(0.0) * 0.1),
+        // Falling confidence raises the "double-check" threshold by up to 0.1
+        confidence_low: 0.3 + ((-traj.confidence_trend()).max(0.0) * 0.1),
+        flow_state: traj.is_flow_state(),
+    }
+}
+```
+
+`EmotionTrajectory` lives in `Runtime` alongside `EmotionState`. After every
+`process_event` call, `runtime.trajectory.push(emotion.snapshot())`. The
+`AdjustedThresholds` result replaces the hardcoded constants in `prompt_modifiers`
+and `tool_policy` — flow state suppresses all modifiers entirely, letting the agent
+work without interruption during its best sessions.
+
 ---
 
 ## Placeholders to Fill
