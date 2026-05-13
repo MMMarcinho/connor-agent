@@ -119,7 +119,7 @@ current emotion state before each LLM call.
 | **Energy** | Response length, tool complexity | Session start, rest recovery | Long sessions, complex tasks, retries |
 | **Focus** | Attention allocation, detail level | Clear goal, steady progress | Context switches, irrelevant outputs |
 | **Frustration** | Conservatism, asking-for-help tendency | Consecutive failures, dead ends | Task success, positive user feedback |
-| **Curiosity** | Explore vs exploit balance | Novel tasks, aizo no-match | Routine tasks, low energy |
+| **Novelty** | Explore vs exploit balance | Novel tasks, aizo no-match | Routine tasks, low energy |
 | **Confidence** | Decisiveness, verification need | Successful tool calls, strong aizo match | New tools, weak aizo match, recent failures |
 
 ### 3.2 Three-Layer Detection System
@@ -168,10 +168,10 @@ Each dimension has concrete event → delta mappings. All values are clamped to 
 - -0.25 on task completion success
 - -0.15 on positive user feedback (L1 keyword or L2 valence > 0.5)
 
-**Curiosity** (novelty-driven, decays to baseline at 5%/min):
+**Novelty** (novelty-driven, decays to baseline at 5%/min):
 - +0.20 when aizo recall returns 0 results (completely novel)
 - -0.10 when aizo recall returns ≥5 strong matches (routine)
-- -0.30 override when Energy < 0.3 (tired → less curious)
+- -0.30 override when Energy < 0.3 (tired → less exploratory)
 
 **Confidence** (evidence-driven, no auto-regression):
 - +0.08 when aizo recall average weight ≥ 7
@@ -187,14 +187,14 @@ by modifying the LLM, but by prepending short directives before each call):
 |-----------|---------------------------|
 | Energy < 0.3 | "Be concise. Skip explanations." |
 | Frustration > 0.6 | "If uncertain, ask for clarification first." |
-| Curiosity > 0.7 | "Consider alternative approaches." |
+| Novelty > 0.7 | "Consider alternative approaches." |
 | Confidence < 0.3 | "Double-check your assumptions before acting." |
 | Focus < 0.4 | "Re-read the current goal before taking action." |
 
 And on tool selection:
 - Low Energy → avoid complex tools (docker, kubectl, long-running ops)
 - High Frustration → prefer tools with highest aizo weight (familiar, safe)
-- High Curiosity → allow exploration of low-weight but relevant tools
+- High Novelty → allow exploration of low-weight but relevant tools
 - Low Confidence → insert verification steps between tool calls
 - Low Focus → reduce parallel tool calls
 

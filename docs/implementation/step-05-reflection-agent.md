@@ -82,7 +82,7 @@ pub struct EmotionLogEntry {
     pub energy: f64,
     pub focus: f64,
     pub frustration: f64,
-    pub curiosity: f64,
+    pub novelty: f64,
     pub confidence: f64,
     pub trigger_event: String,
 }
@@ -228,7 +228,7 @@ Return ONLY valid JSON with this exact shape:
   "emotion_correction": {{
     "note": "one sentence summary of emotional arc",
     "suggested_confidence_adjustment": 0.0,
-    "suggested_curiosity_adjustment": 0.0
+    "suggested_novelty_adjustment": 0.0
   }},
   "motivation_correction": {{
     "suggested_curiosity_baseline_delta": 0.0,
@@ -275,7 +275,7 @@ struct ConfirmItem {
 struct EmotionCorrection {
     note: String,
     suggested_confidence_adjustment: f64,
-    suggested_curiosity_adjustment: f64,
+    suggested_novelty_adjustment: f64,
 }
 
 #[derive(Debug, Deserialize)]

@@ -18,12 +18,18 @@ File: `src/runtime/emotion.rs`
 
 ```rust
 /// 5-dimension emotion state vector. All values clamped to [0.0, 1.0].
+///
+/// Note: the exploration-drive dimension is named `novelty` here (not `curiosity`)
+/// to avoid confusion with `MotivationState::curiosity`, which is a distinct
+/// higher-level drive. Both concepts relate to exploration, but emotion Novelty
+/// is a reactive signal (input), while motivation Curiosity is a behavioral
+/// directive (output).
 #[derive(Debug, Clone)]
 pub struct EmotionState {
     pub energy: f64,        // decreases with activity, recovers with rest
     pub focus: f64,         // anchored to task clarity
     pub frustration: f64,   // accumulates with failures, decays to baseline
-    pub curiosity: f64,     // driven by novelty
+    pub novelty: f64,       // driven by how unknown the current situation is
     pub confidence: f64,    // driven by evidence
 }
 
@@ -33,7 +39,7 @@ impl Default for EmotionState {
             energy:       1.0,   // start fresh
             focus:        0.7,   // reasonably focused
             frustration:  0.05,  // essentially zero
-            curiosity:    0.5,   // neutral
+            novelty:      0.5,   // neutral — neither familiar nor alien
             confidence:   0.5,   // neutral — no evidence yet
         }
     }
@@ -133,11 +139,11 @@ impl EmotionState {
                 self.apply(&mut self.confidence, -0.08);
             }
             AizoRecallEmpty => {
-                self.apply(&mut self.curiosity, +0.20);
+                self.apply(&mut self.novelty, +0.20);
                 self.apply(&mut self.confidence, -0.05);
             }
             AizoRecallStrongMatch => {
-                self.apply(&mut self.curiosity, -0.10);
+                self.apply(&mut self.novelty, -0.10);
                 self.apply(&mut self.confidence, +0.08);
             }
             IdlePeriod { minutes } => {
@@ -150,15 +156,27 @@ impl EmotionState {
         }
     }
 
-    /// Natural decay toward baseline for Frustration and Curiosity.
-    /// Called on a timer (e.g., every minute).
+    /// Natural decay toward baseline for Frustration and Novelty.
+    /// Called based on elapsed time since the last turn.
     pub fn natural_decay(&mut self, delta_minutes: f64) {
         let rate = 0.05_f64.powf(delta_minutes); // 5% per minute decay toward baseline
         // Frustration baseline = 0.0
         self.frustration *= rate;
-        // Curiosity baseline = 0.5
-        self.curiosity = 0.5 + (self.curiosity - 0.5) * rate;
+        // Novelty baseline = 0.5 (neither over-stimulated nor under-stimulated)
+        self.novelty = 0.5 + (self.novelty - 0.5) * rate;
         // Energy and Confidence do NOT auto-regress
+    }
+
+    /// Apply a named correction (used by Reflection Agent for retrospective adjustments).
+    pub fn apply_correction(&mut self, delta: f64, dimension: &str) {
+        match dimension {
+            "energy"      => self.apply(&mut self.energy, delta),
+            "focus"       => self.apply(&mut self.focus, delta),
+            "frustration" => self.apply(&mut self.frustration, delta),
+            "novelty"     => self.apply(&mut self.novelty, delta),
+            "confidence"  => self.apply(&mut self.confidence, delta),
+            _ => {}
+        }
     }
 }
 ```
@@ -210,7 +228,7 @@ pub fn prompt_modifiers(state: &EmotionState) -> Vec<String> {
     if state.frustration > 0.6 {
         modifiers.push("If uncertain about anything, ask for clarification first. Prefer safe approaches.".into());
     }
-    if state.curiosity > 0.7 {
+    if state.novelty > 0.7 {
         modifiers.push("Consider alternative approaches and note interesting observations.".into());
     }
     if state.confidence < 0.3 {
@@ -232,7 +250,7 @@ pub fn tool_policy(state: &EmotionState) -> ToolPolicy {
     ToolPolicy {
         avoid_complex: state.energy < 0.3 || state.frustration > 0.7,
         prefer_familiar: state.frustration > 0.5,
-        allow_exploration: state.curiosity > 0.6 && state.energy > 0.4,
+        allow_exploration: state.novelty > 0.6 && state.energy > 0.4,
         require_verification_step: state.confidence < 0.3,
         reduce_parallel: state.focus < 0.4,
     }
@@ -258,7 +276,7 @@ impl EmotionState {
             energy: self.energy,
             focus: self.focus,
             frustration: self.frustration,
-            curiosity: self.curiosity,
+            novelty: self.novelty,
             confidence: self.confidence,
         }
     }
@@ -268,16 +286,127 @@ pub struct EmotionSnapshot {
     pub energy: f64,
     pub focus: f64,
     pub frustration: f64,
-    pub curiosity: f64,
+    pub novelty: f64,
     pub confidence: f64,
 }
 ```
 
+### 3.8 Replay / Simulation Mode
+
+The delta values in §3.3 (0.03, 0.12, 0.25, etc.) are starting estimates.
+Without a way to observe them on real sessions, calibration is guesswork.
+
+The replay mode processes a recorded event log through the delta rules and
+prints the emotion state at each step, so you can tune values without running
+live sessions.
+
+#### 3.8a Event log format
+
+Save events as newline-delimited JSON during live runs (one object per line):
+
+```json
+{"ts":"2026-01-01T10:00:00Z","event":"LlmCallCompleted"}
+{"ts":"2026-01-01T10:00:01Z","event":"SimpleToolCall"}
+{"ts":"2026-01-01T10:00:02Z","event":"ToolSuccess"}
+{"ts":"2026-01-01T10:00:10Z","event":"ToolFailure","same_tool_consecutive_failures":1}
+{"ts":"2026-01-01T10:00:15Z","event":"UserPositiveKeyword"}
+{"ts":"2026-01-01T10:05:00Z","event":"IdlePeriod","minutes":5.0}
+```
+
+Write event log in the Runtime main loop alongside episodic buffer writes (step 12).
+Default log path: `~/.connor/sessions/<date>-events.jsonl`
+
+#### 3.8b CLI invocation
+
+```
+connor-agent --replay ~/.connor/sessions/2026-01-01-events.jsonl
+```
+
+#### 3.8c Implementation
+
+```rust
+/// Run a saved event log through the emotion engine and print the state trace.
+/// Used to calibrate delta values without running a live session.
+pub fn replay_session(events_path: &str) {
+    let content = std::fs::read_to_string(events_path)
+        .expect("could not read event log");
+
+    let mut state = EmotionState::default();
+    let mut step = 0usize;
+
+    println!(
+        "{:<5} {:<30} {:>7} {:>7} {:>12} {:>8} {:>10}",
+        "Step", "Event", "Energy", "Focus", "Frustration", "Novelty", "Confidence"
+    );
+    println!("{}", "-".repeat(85));
+
+    // Print initial state
+    println!(
+        "{:<5} {:<30} {:>7.3} {:>7.3} {:>12.3} {:>8.3} {:>10.3}",
+        0, "(initial)",
+        state.energy, state.focus, state.frustration, state.novelty, state.confidence
+    );
+
+    for line in content.lines() {
+        let Ok(raw) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        let Ok(event) = parse_event_json(&raw) else { continue };
+
+        state.process_event(&event);
+        step += 1;
+
+        println!(
+            "{:<5} {:<30} {:>7.3} {:>7.3} {:>12.3} {:>8.3} {:>10.3}",
+            step,
+            raw["event"].as_str().unwrap_or("?"),
+            state.energy, state.focus, state.frustration, state.novelty, state.confidence
+        );
+    }
+
+    println!("\nFinal state after {step} events:");
+    println!("  energy={:.3} focus={:.3} frustration={:.3} novelty={:.3} confidence={:.3}",
+        state.energy, state.focus, state.frustration, state.novelty, state.confidence);
+}
+
+fn parse_event_json(raw: &serde_json::Value) -> Result<DetectedEvent, ()> {
+    match raw["event"].as_str().ok_or(())? {
+        "LlmCallCompleted"      => Ok(DetectedEvent::LlmCallCompleted),
+        "SimpleToolCall"        => Ok(DetectedEvent::SimpleToolCall),
+        "ComplexToolCall"       => Ok(DetectedEvent::ComplexToolCall),
+        "ToolSuccess"           => Ok(DetectedEvent::ToolSuccess),
+        "ToolFailure"           => Ok(DetectedEvent::ToolFailure {
+            same_tool_consecutive_failures: raw["same_tool_consecutive_failures"]
+                .as_u64().unwrap_or(1) as u32,
+        }),
+        "UserPositiveKeyword"   => Ok(DetectedEvent::UserPositiveKeyword),
+        "UserNegativeKeyword"   => Ok(DetectedEvent::UserNegativeKeyword),
+        "AizoRecallEmpty"       => Ok(DetectedEvent::AizoRecallEmpty),
+        "AizoRecallStrongMatch" => Ok(DetectedEvent::AizoRecallStrongMatch),
+        "IdlePeriod"            => Ok(DetectedEvent::IdlePeriod {
+            minutes: raw["minutes"].as_f64().unwrap_or(1.0),
+        }),
+        "ReflectionCompleted"   => Ok(DetectedEvent::ReflectionCompleted),
+        _ => Err(()),
+    }
+}
+```
+
+#### 3.8d Calibration workflow
+
+1. Run a live session with event logging enabled.
+2. After the session, run `--replay` and review the trace.
+3. If `frustration` hit 0.8+ before the user expressed frustration, lower `+0.12` or `+0.20`.
+4. If `energy` drained too fast, lower `-0.03` per LLM call.
+5. Adjust, re-run `--replay` on the same log, repeat until the trace "feels right."
+6. Delta values can be made configurable via a `[emotion_deltas]` section in a
+   TOML config file without recompiling — `[TODO: config file path and format]`.
+
+---
+
 ## Placeholders to Fill
 
-- **[TODO: initial emotion state]** — should the default values be different? Should they be loaded from aizo on startup (e.g., "this agent tends to start sessions with high curiosity")?
-- **[TODO: delta values calibration]** — all delta values (0.03, 0.12, 0.25, etc.) are starting points. What's the process for tuning them? Do you want a config file or CLI flags to adjust them without recompiling?
-- **[TODO: natural decay timer granularity]** — should natural decay run on a 1-minute timer, or be recomputed on each event based on elapsed time?
+- **[TODO: initial emotion state]** — should the default values be different? Should they be loaded from aizo on startup (e.g., "this agent tends to start sessions with high novelty")?
+- **[TODO: delta values calibration]** — use the replay mode (§3.8) to calibrate. Consider a `[emotion_deltas]` TOML config block so values can be tuned without recompiling.
+- **[TODO: natural decay timer granularity]** — natural decay is now computed per-turn based on elapsed time since last turn (see step-00 §C.1 step 5). Confirm this is the right granularity or add a background timer.
 - **[TODO: keyword list completeness]** — the positive/negative keyword lists need expansion. Should they be loaded from an external file so they can be tuned without recompilation? Path: `[TODO: keyword list file path]`
-- **[TODO: emotion state persistence]** — should the emotion state survive across sessions? If the agent was "tired and frustrated" at the end of session A, should session B start with those same values, or reset to defaults?
+- ~~**[TODO: emotion state persistence]**~~ — **resolved in step-00 §D**: the session-end state is stored in aizo and regressed 50% toward defaults at next session start.
 - **[TODO: L2 integration point]** — the L1 keyword detector is basic. When L2 (valence scorer) is ready, how should L1 and L2 results be merged? L2 override L1? Both contribute independent deltas?
