@@ -1,2 +1,4 @@
-.superpowers/
-.claude/settings.local.json
+node_modules/
+.env
+*.local
+.connor/
