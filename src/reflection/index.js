@@ -76,7 +76,7 @@ Return ONLY valid JSON. If nothing is worth saving, return empty arrays.
       );
     }
     for (const item of (result.confirmed_items || [])) {
-      await aizo.touch(item.category, item.item);
+      await aizo.touch(item.item);
     }
 
     process.stderr.write(
