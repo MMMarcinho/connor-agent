@@ -1,0 +1,98 @@
+'use strict';
+
+const aizo = require('../aizo_bridge');
+
+const DEFAULT_TRIGGER = {
+  toolCallThreshold: 15,
+  idleMinutesThreshold: 10,
+};
+
+class ReflectionTrigger {
+  constructor(opts = {}) {
+    this.toolCallThreshold   = opts.toolCallThreshold   || DEFAULT_TRIGGER.toolCallThreshold;
+    this.idleMinutesThreshold = opts.idleMinutesThreshold || DEFAULT_TRIGGER.idleMinutesThreshold;
+  }
+
+  shouldReflect(toolCallsSinceLast, idleMinutes) {
+    return toolCallsSinceLast >= this.toolCallThreshold
+      || idleMinutes >= this.idleMinutesThreshold;
+  }
+}
+
+// Runs in the background via setImmediate — never blocks the main turn.
+async function runReflection(input, llmClient) {
+  const { episodicEvents, emotionLog, currentMemories } = input;
+
+  if (!llmClient) return null;
+  if (episodicEvents.length === 0) return null;
+
+  try {
+    const summary = episodicEvents.slice(-20).map(e =>
+      `[${new Date(e.timestamp).toISOString()}] ${e.type}: ${e.summary}`
+    ).join('\n');
+
+    const memContext = (currentMemories || []).slice(0, 10).map(m =>
+      `[${m.category} ${m.effective_weight || m.score || '?'}] ${m.item}: ${m.reason}`
+    ).join('\n') || '(none)';
+
+    const emotionSummary = (emotionLog || []).slice(-5).map(snap =>
+      `E:${snap.energy?.toFixed(2)} Fr:${snap.frustration?.toFixed(2)} N:${snap.novelty?.toFixed(2)} Co:${snap.confidence?.toFixed(2)}`
+    ).join(' → ') || '(none)';
+
+    const prompt = `You are a background memory consolidation agent reviewing a completed session.
+
+## Current Top Memories
+${memContext}
+
+## Session Events (last 20)
+${summary}
+
+## Emotion Arc (last 5 snapshots)
+${emotionSummary}
+
+Return ONLY valid JSON. If nothing is worth saving, return empty arrays.
+{
+  "new_entries": [{"category": "preference|aversion|habit|style|taboo", "item": "...", "reason": "...", "score": 7.0, "keywords": []}],
+  "confirmed_items": [{"category": "...", "item": "..."}],
+  "emotion_correction": {"note": "...", "suggested_novelty_adjustment": 0.0, "suggested_confidence_adjustment": 0.0},
+  "mode_correction": {"explore_bias_delta": 0.0, "conserve_bias_delta": 0.0}
+}`;
+
+    const resp = await llmClient.messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 1024,
+      messages: [{ role: 'user', content: prompt }],
+    });
+
+    const text = resp.content.find(b => b.type === 'text')?.text || '{}';
+    const cleaned = text.replace(/```json\n?|\n?```/g, '').trim();
+    const result = JSON.parse(cleaned);
+
+    // Write new memories to aizo
+    for (const entry of (result.new_entries || [])) {
+      await aizo.add(
+        entry.category, entry.item, entry.reason,
+        entry.score, entry.keywords || []
+      );
+    }
+    for (const item of (result.confirmed_items || [])) {
+      await aizo.touch(item.category, item.item);
+    }
+
+    process.stderr.write(
+      `[reflection] +${(result.new_entries || []).length} memories, ` +
+      `confirmed ${(result.confirmed_items || []).length}\n`
+    );
+
+    return result;
+  } catch (err) {
+    process.stderr.write(`[reflection] failed: ${err.message}\n`);
+    return null;
+  }
+}
+
+function spawnReflection(input, llmClient) {
+  setImmediate(() => runReflection(input, llmClient).catch(() => {}));
+}
+
+module.exports = { ReflectionTrigger, spawnReflection };

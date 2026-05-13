@@ -1,0 +1,16 @@
+{
+  "name": "connor-agent",
+  "version": "0.1.0",
+  "description": "Cyber bionic agent with human-like cognition: unified memory, dynamic emotions, memory-driven tool learning",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "replay": "node src/index.js --replay"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.36.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
