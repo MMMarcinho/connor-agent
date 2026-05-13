@@ -13,8 +13,10 @@ const { detectSignals, selectMode, modeDirective, ModeTracker } = require('./beh
 const { ToolRegistry } = require('../tools');
 const { ReflectionTrigger, spawnReflection } = require('../reflection');
 
-const MODEL       = process.env.CONNOR_MODEL    || 'claude-sonnet-4-6';
-const MAX_TOKENS  = Number(process.env.CONNOR_MAX_TOKENS || 4096);
+// Model constants have a fallback here so Runtime works without config injection
+// (e.g. in tests). Production code passes config via constructor.
+const DEFAULT_MODEL      = process.env.CONNOR_MODEL    || 'claude-sonnet-4-6';
+const DEFAULT_MAX_TOKENS = Number(process.env.CONNOR_MAX_TOKENS || 4096);
 
 const BASE_PROMPT = `You are connor-agent, a thoughtful cyber bionic assistant with long-term memory and adaptive reasoning.
 You have tools available and draw on past experience to guide your decisions.
@@ -22,7 +24,19 @@ You never perform irreversible or destructive actions without explicit user conf
 When uncertain, ask. When confident, act.`;
 
 class Runtime {
-  constructor(toolRegistry) {
+  constructor(toolRegistry, config = {}, sessionLogger = null) {
+    this.config  = config;
+    this.session = sessionLogger;
+
+    const model     = config.model      || DEFAULT_MODEL;
+    const maxTokens = config.max_tokens || DEFAULT_MAX_TOKENS;
+    const reflOpts  = {
+      toolCallThreshold:    config.reflection_tool_call_threshold    || 15,
+      idleMinutesThreshold: config.reflection_idle_minutes_threshold || 10,
+    };
+
+    this.model     = model;
+    this.maxTokens = maxTokens;
     this.client    = new Anthropic();
     this.tools     = toolRegistry;
     this.memory    = new WorkingMemory();
@@ -30,7 +44,7 @@ class Runtime {
     this.trajectory = new EmotionTrajectory();
     this.modeTracker = new ModeTracker();
     this.modeWeights = { exploreBias: 0, conserveBias: 0 };
-    this.reflectionTrigger = new ReflectionTrigger();
+    this.reflectionTrigger = new ReflectionTrigger(reflOpts);
 
     // Bookkeeping
     this.toolCallsSinceReflection = 0;
@@ -125,6 +139,11 @@ class Runtime {
       output += '\n\n_(I noticed this might be worth exploring further — want me to dig in?)_';
     }
 
+    // ── Session logging ───────────────────────────────────────────────────
+    if (this.session) {
+      this.session.logTurn(userMessage, output, this.emotion.snapshot());
+    }
+
     // Save emotion snapshot for next session
     await aizo.add(
       'habit', 'session-end-emotion-state',
@@ -164,8 +183,8 @@ class Runtime {
       this.emotion.processEvent({ type: 'LlmCallCompleted' });
 
       const response = await this.client.messages.create({
-        model: MODEL,
-        max_tokens: MAX_TOKENS,
+        model: this.model,
+        max_tokens: this.maxTokens,
         system: systemPrompt,
         tools: tools.length > 0 ? tools : undefined,
         messages,
@@ -225,6 +244,10 @@ class Runtime {
         this.trajectory.push(this.emotion.snapshot());
         this.emotionLog.push(this.emotion.snapshot());
         this.toolCallsSinceReflection++;
+
+        if (this.session) {
+          this.session.logToolCall(toolUse.name, result.exitCode, this.emotion.snapshot());
+        }
 
         // ── Step 11: Emotional write-back ───────────────────────────────
         const activeTask = this.memory.taskStack.active();

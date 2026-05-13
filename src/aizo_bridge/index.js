@@ -3,7 +3,10 @@
 const { execFile } = require('child_process');
 const { spawn } = require('child_process');
 
-const AIZO_BIN = process.env.AIZO_BIN || 'aizo';
+// Binary and DB path can be overridden via env vars or config (config takes
+// precedence at call time via getAizoBin / getAizoDB helpers below).
+const AIZO_BIN = process.env.AIZO_BINARY || process.env.AIZO_BIN || 'aizo';
+const AIZO_DB  = process.env.AIZO_DB || null;
 const TIMEOUTS = {
   recall: 2000,
   add:    1000,
@@ -13,12 +16,27 @@ const TIMEOUTS = {
 };
 
 let degraded = false;
+let _configBin = null;
+let _configDb  = null;
+
+function configure(opts = {}) {
+  if (opts.aizo_binary) _configBin = opts.aizo_binary;
+  if (opts.aizo_db)     _configDb  = opts.aizo_db;
+}
+
+function _bin() { return _configBin || AIZO_BIN; }
+
+function _baseArgs() {
+  const db = _configDb || AIZO_DB;
+  return db ? ['--db', db] : [];
+}
 
 function runAizo(args, timeout) {
   return new Promise((resolve) => {
     if (degraded) return resolve(null);
 
-    const child = execFile(AIZO_BIN, args, { timeout }, (err, stdout, stderr) => {
+    const fullArgs = [..._baseArgs(), ...args];
+    const child = execFile(_bin(), fullArgs, { timeout }, (err, stdout, stderr) => {
       if (err) {
         if (err.code === 'ENOENT') {
           if (!degraded) {
@@ -75,7 +93,7 @@ function analyze(sessionText) {
   return new Promise((resolve) => {
     if (degraded) return resolve([]);
 
-    const child = spawn(AIZO_BIN, ['analyze', '--json'], {
+    const child = spawn(_bin(), [..._baseArgs(), 'analyze', '--json'], {
       timeout: TIMEOUTS.analyze,
     });
 
@@ -109,4 +127,4 @@ function analyze(sessionText) {
   });
 }
 
-module.exports = { recall, add, touch, top, analyze, isDegraded: () => degraded };
+module.exports = { recall, add, touch, top, analyze, configure, isDegraded: () => degraded };

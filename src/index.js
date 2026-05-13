@@ -7,6 +7,8 @@ const fs = require('fs');
 
 const { ToolRegistry } = require('./tools');
 const { Runtime } = require('./runtime');
+const { getConfig } = require('./config');
+const { SessionLogger } = require('./session');
 
 // ── Built-in tools ───────────────────────────────────────────────────────────
 
@@ -109,11 +111,17 @@ async function main() {
     process.exit(1);
   }
 
+  const config  = getConfig();
+  const aizo = require('./aizo_bridge');
+  aizo.configure({ aizo_binary: config.aizo_binary, aizo_db: config.aizo_db });
+
+  const session = new SessionLogger(config.sessions_dir);
   const registry = buildToolRegistry();
-  const runtime  = new Runtime(registry);
+  const runtime  = new Runtime(registry, config, session);
 
   console.log('connor-agent initializing...');
   await runtime.initialize();
+  console.log(`Session: ${session.sessionId}`);
   console.log('Ready. Type your message, /status, /task <desc>, /done, /reset, or /quit\n');
 
   const rl = readline.createInterface({
@@ -145,6 +153,7 @@ async function main() {
       const desc = input.slice(6).trim();
       const id = runtime.memory.taskStack.push(desc);
       runtime.memory.activeContext = desc;
+      if (session) session.logTaskStart(id, desc);
       console.log(`Task #${id} started: ${desc}`);
       rl.prompt();
       return;
@@ -156,6 +165,7 @@ async function main() {
       else {
         runtime.memory.taskStack.complete(task.id);
         runtime.emotion.processEvent({ type: 'TaskCompleted' });
+        if (session) session.logTaskComplete(task.id);
         console.log(`Task #${task.id} completed.`);
       }
       rl.prompt();
@@ -182,6 +192,7 @@ async function main() {
   });
 
   rl.on('close', () => {
+    if (session) session.end(runtime.emotion.snapshot());
     console.log('\nSession ended.');
     process.exit(0);
   });
