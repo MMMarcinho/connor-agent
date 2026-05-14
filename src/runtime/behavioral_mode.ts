@@ -1,4 +1,4 @@
-'use strict';
+import type { EmotionSnapshot, BehavioralMode, ModeWeights, Signals, AizoEntry } from '../types';
 
 const RISK_PATTERNS = [
   'rm -rf', 'drop table', 'drop database', 'force push', '--force',
@@ -7,17 +7,23 @@ const RISK_PATTERNS = [
   'git push --force', 'git push -f', ':(){:|:&};:',
 ];
 
-function detectSignals(userText, aizoResults) {
-  const lower = (userText || '').toLowerCase();
+export function detectSignals(userText: string, aizoResults: AizoEntry[]): Signals {
+  const lower = (userText ?? '').toLowerCase();
   return {
     riskDetected: RISK_PATTERNS.some(p => lower.includes(p)),
-    tabooMatched: (aizoResults || []).some(e => e.category === 'taboo'),
+    tabooMatched: (aizoResults ?? []).some(
+      e => (e.base_score ?? e.score ?? 10) <= 1.5
+    ),
   };
 }
 
-function selectMode(emotion, signals, weights = {}) {
-  const exploreBias  = weights.exploreBias  || 0;
-  const conserveBias = weights.conserveBias || 0;
+export function selectMode(
+  emotion: EmotionSnapshot,
+  signals: Signals,
+  weights: Partial<ModeWeights> = {},
+): BehavioralMode {
+  const exploreBias  = weights.exploreBias  ?? 0;
+  const conserveBias = weights.conserveBias ?? 0;
 
   if (signals.tabooMatched || signals.riskDetected) return 'PROTECT';
 
@@ -28,14 +34,12 @@ function selectMode(emotion, signals, weights = {}) {
   }
 
   const noveltyThreshold = 0.6 - exploreBias * 0.1;
-  if (emotion.novelty > noveltyThreshold && emotion.confidence > 0.5) {
-    return 'EXPLORE';
-  }
+  if (emotion.novelty > noveltyThreshold && emotion.confidence > 0.5) return 'EXPLORE';
 
   return 'DELIVER';
 }
 
-function modeDirective(mode) {
+export function modeDirective(mode: BehavioralMode): string {
   switch (mode) {
     case 'PROTECT':
       return 'A safety concern is present. Warn the user and ask for explicit confirmation before proceeding. Do NOT execute risky operations.';
@@ -48,18 +52,14 @@ function modeDirective(mode) {
   }
 }
 
-class ModeTracker {
-  constructor() {
-    this.current = 'DELIVER';
-    this.consecutiveExplore = 0;
-  }
+export class ModeTracker {
+  current:           BehavioralMode = 'DELIVER';
+  consecutiveExplore = 0;
 
-  update(newMode) {
+  update(newMode: BehavioralMode): boolean {
     this.current = newMode;
     if (newMode === 'EXPLORE') this.consecutiveExplore++;
     else this.consecutiveExplore = 0;
     return this.consecutiveExplore >= 3;
   }
 }
-
-module.exports = { detectSignals, selectMode, modeDirective, ModeTracker };
