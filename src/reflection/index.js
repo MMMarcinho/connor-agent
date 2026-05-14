@@ -50,10 +50,11 @@ ${summary}
 ## Emotion Arc (last 5 snapshots)
 ${emotionSummary}
 
-Return ONLY valid JSON. If nothing is worth saving, return empty arrays.
+Return ONLY valid JSON. Use score 0–10: 0=hard limit, 2=aversion, 5=habit, 7=style, 8=preference.
+If nothing is worth saving, return empty arrays.
 {
-  "new_entries": [{"category": "preference|aversion|habit|style|taboo", "item": "...", "reason": "...", "score": 7.0, "keywords": []}],
-  "confirmed_items": [{"category": "...", "item": "..."}],
+  "new_entries": [{"item": "...", "reason": "...", "score": 7.0, "keywords": []}],
+  "confirmed_items": [{"item": "..."}],
   "emotion_correction": {"note": "...", "suggested_novelty_adjustment": 0.0, "suggested_confidence_adjustment": 0.0},
   "mode_correction": {"explore_bias_delta": 0.0, "conserve_bias_delta": 0.0}
 }`;
@@ -70,13 +71,10 @@ Return ONLY valid JSON. If nothing is worth saving, return empty arrays.
 
     // Write new memories to aizo
     for (const entry of (result.new_entries || [])) {
-      await aizo.add(
-        entry.category, entry.item, entry.reason,
-        entry.score, entry.keywords || []
-      );
+      await aizo.add(entry.item, entry.reason, entry.score, entry.keywords || []);
     }
     for (const item of (result.confirmed_items || [])) {
-      await aizo.touch(item.category, item.item);
+      await aizo.touch(item.item);
     }
 
     process.stderr.write(

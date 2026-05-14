@@ -8,7 +8,8 @@
     "replay": "node src/index.js --replay"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.36.0"
+    "@anthropic-ai/sdk": "^0.36.0",
+    "aizo-node": "^0.3.0"
   },
   "engines": {
     "node": ">=18.0.0"

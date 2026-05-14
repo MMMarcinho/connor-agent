@@ -50,8 +50,8 @@ async function bootstrap(memoryPath) {
     return;
   }
   for (const e of blocks) {
-    await aizo.add(e.category, e.item, e.reason || '', e.score, e.keywords);
-    console.log(`  + [${e.category} ${e.score}] ${e.item}`);
+    await aizo.add(e.item, e.reason || '', e.score, e.keywords);
+    console.log(`  + [${e.score}] ${e.item}`);
   }
   console.log(`\nBootstrapped ${blocks.length} memory entries.`);
 }

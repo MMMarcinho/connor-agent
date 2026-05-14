@@ -145,10 +145,7 @@ class Runtime {
     }
 
     // Save emotion snapshot for next session
-    await aizo.add(
-      'habit', 'session-end-emotion-state',
-      JSON.stringify(this.emotion.snapshot()), 5, []
-    );
+    await aizo.add('session-end-emotion-state', JSON.stringify(this.emotion.snapshot()), 5);
 
     // ── Step 14: Reflection check ─────────────────────────────────────────
     const idleSinceActivity = (Date.now() - this.lastActivityAt) / 60000;
@@ -222,7 +219,7 @@ class Runtime {
           this.emotion.processEvent({ type: 'ToolSuccess' });
           // Record successful tool use to aizo
           aizo.add(
-            'preference', `use ${toolUse.name}`,
+            `use ${toolUse.name}`,
             `Successfully used ${toolUse.name}: ${(result.stdout || '').slice(0, 80)}`,
             8.0, [toolUse.name]
           ).catch(() => {});
@@ -233,9 +230,8 @@ class Runtime {
             type: 'ToolFailure',
             consecutiveFailures: this.consecutiveFailures[toolUse.name],
           });
-          // Record failure to aizo
           aizo.add(
-            'aversion', `${toolUse.name} failed`,
+            `${toolUse.name} failed`,
             `${toolUse.name} failed: ${(result.stderr || '').slice(0, 80)}`,
             2.0, [toolUse.name]
           ).catch(() => {});
