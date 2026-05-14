@@ -22,11 +22,15 @@ export class ReflectionTrigger {
   }
 }
 
+// Reflection focuses only on what can't be inferred from the transcript alone:
+// which existing memories are still relevant (touch), and whether the emotion
+// model needs calibration. Preference extraction from text is handled by
+// aizo.analyze() at session end (using aizo extract → LLM → aizo import).
+
 interface ReflectionResult {
-  new_entries?:       { item: string; reason: string; score: number; keywords: string[] }[];
-  confirmed_items?:   { item: string }[];
-  emotion_correction?: { note: string; suggested_novelty_adjustment: number; suggested_confidence_adjustment: number };
-  mode_correction?:   { explore_bias_delta: number; conserve_bias_delta: number };
+  confirmed_items?:    { item: string }[];
+  emotion_correction?: { suggested_novelty_adjustment: number; suggested_confidence_adjustment: number };
+  mode_correction?:    { explore_bias_delta: number; conserve_bias_delta: number };
 }
 
 async function runReflection(
@@ -41,36 +45,34 @@ async function runReflection(
     ).join('\n');
 
     const memContext = (input.currentMemories ?? []).slice(0, 10).map(m =>
-      `[${m.effective_weight ?? m.score ?? '?'}] ${m.item}: ${m.reason}`
+      `[${((m.effective_weight ?? m.score ?? 0) as number).toFixed(1)}] ${m.item}`
     ).join('\n') || '(none)';
 
-    const emotionSummary = (input.emotionLog ?? []).slice(-5).map(snap =>
-      `E:${snap.energy?.toFixed(2)} Fr:${snap.frustration?.toFixed(2)} N:${snap.novelty?.toFixed(2)} Co:${snap.confidence?.toFixed(2)}`
+    const emotionArc = (input.emotionLog ?? []).slice(-5).map(snap =>
+      `E:${snap.energy.toFixed(2)} Fr:${snap.frustration.toFixed(2)} N:${snap.novelty.toFixed(2)} Co:${snap.confidence.toFixed(2)}`
     ).join(' → ') || '(none)';
 
-    const prompt = `You are a background memory consolidation agent reviewing a completed session.
+    const prompt = `You are reviewing a mid-session activity log to calibrate an agent's internal state.
 
-## Current Top Memories
+## Active Memories (top 10 by weight)
 ${memContext}
 
-## Session Events (last 20)
+## Recent Events (last 20)
 ${summary}
 
-## Emotion Arc (last 5 snapshots)
-${emotionSummary}
+## Emotion Arc
+${emotionArc}
 
-Return ONLY valid JSON. Use score 0–10: 0=hard limit, 2=aversion, 5=habit, 7=style, 8=preference.
-If nothing is worth saving, return empty arrays.
+Return ONLY valid JSON. Return empty arrays/zeros if nothing needs changing.
 {
-  "new_entries": [{"item": "...", "reason": "...", "score": 7.0, "keywords": []}],
   "confirmed_items": [{"item": "..."}],
-  "emotion_correction": {"note": "...", "suggested_novelty_adjustment": 0.0, "suggested_confidence_adjustment": 0.0},
+  "emotion_correction": {"suggested_novelty_adjustment": 0.0, "suggested_confidence_adjustment": 0.0},
   "mode_correction": {"explore_bias_delta": 0.0, "conserve_bias_delta": 0.0}
 }`;
 
     const resp = await llmClient.messages.create({
       model:      'claude-haiku-4-5-20251001',
-      max_tokens: 1024,
+      max_tokens: 512,
       messages:   [{ role: 'user', content: prompt }],
     });
 
@@ -78,16 +80,12 @@ If nothing is worth saving, return empty arrays.
     const cleaned = text.replace(/```json\n?|\n?```/g, '').trim();
     const result  = JSON.parse(cleaned) as ReflectionResult;
 
-    for (const entry of (result.new_entries ?? [])) {
-      await aizo.add(entry.item, entry.reason, entry.score, entry.keywords ?? []);
-    }
     for (const item of (result.confirmed_items ?? [])) {
       await aizo.touch(item.item);
     }
 
     process.stderr.write(
-      `[reflection] +${(result.new_entries ?? []).length} memories, ` +
-      `confirmed ${(result.confirmed_items ?? []).length}\n`
+      `[reflection] confirmed ${(result.confirmed_items ?? []).length} memories\n`
     );
 
     return result;

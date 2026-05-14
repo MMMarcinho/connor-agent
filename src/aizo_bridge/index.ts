@@ -1,6 +1,7 @@
 import { execFile, spawn } from 'child_process';
 import path from 'path';
 import fs from 'fs';
+import type Anthropic from '@anthropic-ai/sdk';
 import type { AizoEntry, AizoConfig } from '../types';
 
 // ── Binary resolution ─────────────────────────────────────────────────────────
@@ -34,7 +35,8 @@ const TIMEOUTS = {
   tag:     1000,
   touch:   1000,
   top:     2000,
-  analyze: 30000,
+  extract: 5000,
+  import:  5000,
 } as const;
 
 // ── Module state ──────────────────────────────────────────────────────────────
@@ -120,24 +122,23 @@ export async function top(n = 20, type?: string): Promise<AizoEntry[]> {
   return parseJson<AizoEntry[]>(await runAizo(args, TIMEOUTS.top), []);
 }
 
-export function analyze(sessionText: string): Promise<AizoEntry[]> {
+// ── Stdin-based subprocess helper ─────────────────────────────────────────────
+
+function runAizoStdin(args: string[], input: string, timeout: number): Promise<string | null> {
   return new Promise((resolve) => {
-    if (degraded) return resolve([]);
+    if (degraded) return resolve(null);
 
-    const child = spawn(getBin(), [..._dbArgs, 'analyze', '--json'], {
-      timeout: TIMEOUTS.analyze,
-    });
-
+    const child  = spawn(getBin(), [..._dbArgs, ...args], { timeout });
     let stdout   = '';
     let finished = false;
 
     child.stdout.on('data', (c: Buffer) => { stdout += c; });
-    child.stderr.on('data', (c: Buffer) => { process.stderr.write(`[aizo analyze] ${c}`); });
+    child.stderr.on('data', (c: Buffer) => { process.stderr.write(`[aizo ${args[0]}] ${c}`); });
 
     child.on('close', (code: number | null) => {
       if (finished) return;
       finished = true;
-      resolve(code === 0 ? parseJson<AizoEntry[]>(stdout, []) : []);
+      resolve(code === 0 ? stdout : null);
     });
 
     child.on('error', (err: NodeJS.ErrnoException) => {
@@ -147,12 +148,51 @@ export function analyze(sessionText: string): Promise<AizoEntry[]> {
         degraded = true;
         process.stderr.write('[aizo] binary not found — running in degraded memory mode\n');
       }
-      resolve([]);
+      resolve(null);
     });
 
-    child.stdin.write(sessionText);
+    child.stdin.write(input);
     child.stdin.end();
   });
+}
+
+// analyze(sessionText, llmClient)
+//
+// Replaces `aizo analyze` (which needs its own LLM config) with a three-step
+// pipeline we fully control:
+//   1. aizo extract  — generates the structured extraction prompt from transcript
+//   2. Claude Haiku  — extracts preferences, returns {"entries":[...]}
+//   3. aizo import   — upserts entries into the DB (handles score smoothing)
+//
+export async function analyze(sessionText: string, llmClient: Anthropic): Promise<void> {
+  if (degraded || !sessionText.trim()) return;
+
+  try {
+    // Step 1: get the extraction prompt
+    const extractionPrompt = await runAizoStdin(['extract'], sessionText, TIMEOUTS.extract);
+    if (!extractionPrompt) return;
+
+    // Step 2: call our LLM
+    const resp = await llmClient.messages.create({
+      model:      'claude-haiku-4-5-20251001',
+      max_tokens: 1024,
+      messages:   [{ role: 'user', content: extractionPrompt }],
+    });
+    const text    = resp.content.find(b => b.type === 'text')?.text ?? '{}';
+    const cleaned = text.replace(/```json\n?|\n?```/g, '').trim();
+
+    // Quick sanity check before piping
+    const parsed = JSON.parse(cleaned) as { entries?: unknown[] };
+    const count  = parsed.entries?.length ?? 0;
+    if (count === 0) return;
+
+    // Step 3: import into aizo
+    await runAizoStdin(['import'], cleaned, TIMEOUTS.import);
+    process.stderr.write(`[aizo] analyze: imported ${count} preference entries\n`);
+
+  } catch (err) {
+    process.stderr.write(`[aizo] analyze failed: ${(err as Error).message}\n`);
+  }
 }
 
 export const isDegraded  = (): boolean  => degraded;

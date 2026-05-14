@@ -199,8 +199,11 @@ async function main(): Promise<void> {
 
   rl.on('close', () => {
     session.end(runtime.emotion.snapshot());
-    console.log('\nSession ended.');
-    process.exit(0);
+    console.log('\nSession ended. Extracting preferences from transcript...');
+    const transcriptPath = path.join(session.sessionDir, 'transcript.md');
+    let transcript = '';
+    try { transcript = fs.readFileSync(transcriptPath, 'utf8'); } catch { /* no transcript */ }
+    runtime.analyzeTranscript(transcript).finally(() => process.exit(0));
   });
 }
 

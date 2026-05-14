@@ -284,4 +284,8 @@ export class Runtime {
     const flow  = this.trajectory.isFlowState() ? ' ⚡ FLOW' : '';
     return `Mode: ${mode}${flow}\n` + this.emotion.display();
   }
+
+  analyzeTranscript(transcript: string): Promise<void> {
+    return aizo.analyze(transcript, this.client);
+  }
 }
