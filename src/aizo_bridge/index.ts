@@ -19,7 +19,7 @@ function resolveAizoBin(override?: string): string {
     const pkgDir  = path.dirname(require.resolve('aizo-node/package.json'));
     const binPath = path.join(pkgDir, 'bin', process.platform === 'win32' ? 'aizo.exe' : 'aizo');
     if (fs.existsSync(binPath)) return binPath;
-    process.stderr.write('[aizo] aizo-node package found but binary missing — was install.js run?\n');
+    process.stderr.write('[aizo] aizo-node installed but binary not yet downloaded (GitHub release pending). Falling back to system PATH.\n');
   } catch {
     // aizo-node not installed; fall through
   }
