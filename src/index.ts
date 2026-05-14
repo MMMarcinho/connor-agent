@@ -1,56 +1,60 @@
 #!/usr/bin/env node
-'use strict';
+import readline from 'readline';
+import path from 'path';
+import fs from 'fs';
 
-const readline = require('readline');
-const path = require('path');
-const fs = require('fs');
+import { ToolRegistry } from './tools';
+import { Runtime } from './runtime';
+import { getConfig } from './config';
+import { SessionLogger } from './session';
+import * as aizo from './aizo_bridge';
+import { EmotionState } from './runtime/emotion';
+import { EmotionTrajectory } from './runtime/emotion';
 
-const { ToolRegistry } = require('./tools');
-const { Runtime } = require('./runtime');
-const { getConfig } = require('./config');
-const { SessionLogger } = require('./session');
+// ── Built-in tools ────────────────────────────────────────────────────────────
 
-// ── Built-in tools ───────────────────────────────────────────────────────────
-
-function buildToolRegistry() {
-  const registry = new ToolRegistry();
+function buildToolRegistry(): ToolRegistry {
+  const registry    = new ToolRegistry();
   const builtinsDir = path.join(__dirname, 'tools', 'builtins');
   for (const file of fs.readdirSync(builtinsDir).filter(f => f.endsWith('.js'))) {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
     registry.register(require(path.join(builtinsDir, file)));
   }
   return registry;
 }
 
-// ── Bootstrap ────────────────────────────────────────────────────────────────
+// ── Bootstrap ─────────────────────────────────────────────────────────────────
 
-async function bootstrap(memoryPath) {
-  const aizo = require('./aizo_bridge');
+async function bootstrap(memoryPath: string): Promise<void> {
   const content = fs.readFileSync(memoryPath, 'utf8');
-  const blocks = [];
+  const blocks: { item: string; reason: string; score: number; keywords: string[] }[] = [];
   const blockRe = /```memory-seed\n([\s\S]*?)```/g;
-  let m;
+  let m: RegExpExecArray | null;
+
   while ((m = blockRe.exec(content)) !== null) {
-    for (const chunk of m[1].split(/^---$/m)) {
-      const entry = {};
+    for (const chunk of m[1]!.split(/^---$/m)) {
+      const entry: Record<string, string> = {};
       for (const line of chunk.trim().split('\n')) {
         const [key, ...rest] = line.split(':');
-        if (key && rest.length) {
-          entry[key.trim()] = rest.join(':').trim();
-        }
+        if (key && rest.length) entry[key.trim()] = rest.join(':').trim();
       }
-      if (entry.category && entry.item) {
-        entry.keywords = entry.keywords ? entry.keywords.split(',').map(s => s.trim()) : [];
-        entry.score    = parseFloat(entry.score) || 5;
-        blocks.push(entry);
+      if (entry['item']) {
+        blocks.push({
+          item:     entry['item'],
+          reason:   entry['reason'] ?? '',
+          score:    parseFloat(entry['score'] ?? '5') || 5,
+          keywords: entry['keywords'] ? entry['keywords'].split(',').map(s => s.trim()) : [],
+        });
       }
     }
   }
+
   if (blocks.length === 0) {
     console.log('No memory-seed blocks found in MEMORY.md');
     return;
   }
   for (const e of blocks) {
-    await aizo.add(e.item, e.reason || '', e.score, e.keywords);
+    await aizo.add(e.item, e.reason, e.score, e.keywords);
     console.log(`  + [${e.score}] ${e.item}`);
   }
   console.log(`\nBootstrapped ${blocks.length} memory entries.`);
@@ -58,8 +62,7 @@ async function bootstrap(memoryPath) {
 
 // ── Replay mode ───────────────────────────────────────────────────────────────
 
-function replay(eventsPath) {
-  const { EmotionState, EmotionTrajectory } = require('./runtime/emotion');
+function replay(eventsPath: string): void {
   const content = fs.readFileSync(eventsPath, 'utf8');
   const lines   = content.trim().split('\n').filter(Boolean);
 
@@ -67,34 +70,40 @@ function replay(eventsPath) {
   const traj  = new EmotionTrajectory();
 
   const header = ['Step', 'Event', 'Energy', 'Focus', 'Frust.', 'Novelty', 'Conf.'];
-  const fmt = (v) => String(v).padEnd(12);
+  const fmt    = (v: string | number) => String(v).padEnd(12);
+
   console.log(header.map(fmt).join(''));
   console.log('-'.repeat(header.length * 12));
-  console.log(['0', '(initial)', state.energy, state.focus, state.frustration, state.novelty, state.confidence]
-    .map((v, i) => i > 1 ? v.toFixed(3) : String(v)).map(fmt).join(''));
+  console.log(
+    ['0', '(initial)', state.energy, state.focus, state.frustration, state.novelty, state.confidence]
+      .map((v, i) => i > 1 ? (v as number).toFixed(3) : String(v))
+      .map(fmt).join('')
+  );
 
   lines.forEach((line, i) => {
-    let raw;
-    try { raw = JSON.parse(line); } catch { return; }
-    state.processEvent(raw);
+    let raw: Record<string, unknown>;
+    try { raw = JSON.parse(line) as Record<string, unknown>; } catch { return; }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    state.processEvent(raw as any);
     traj.push(state.snapshot());
     const row = [
-      i + 1, raw.type || raw.event || '?',
+      i + 1,
+      (raw['type'] ?? raw['event'] ?? '?') as string,
       state.energy, state.focus, state.frustration, state.novelty, state.confidence,
     ];
-    console.log(row.map((v, j) => j > 1 ? v.toFixed(3) : String(v)).map(fmt).join(''));
+    console.log(row.map((v, j) => j > 1 ? (v as number).toFixed(3) : String(v)).map(fmt).join(''));
   });
 
   console.log(`\nFinal — flow state: ${traj.isFlowState()}`);
 }
 
-// ── Main ─────────────────────────────────────────────────────────────────────
+// ── Main ──────────────────────────────────────────────────────────────────────
 
-async function main() {
+async function main(): Promise<void> {
   const args = process.argv.slice(2);
 
   if (args[0] === '--bootstrap') {
-    const memPath = args[1] || path.join(process.cwd(), 'MEMORY.md');
+    const memPath = args[1] ?? path.join(process.cwd(), 'MEMORY.md');
     await bootstrap(memPath);
     return;
   }
@@ -106,16 +115,15 @@ async function main() {
     return;
   }
 
-  if (!process.env.ANTHROPIC_API_KEY) {
+  if (!process.env['ANTHROPIC_API_KEY']) {
     console.error('Error: ANTHROPIC_API_KEY environment variable not set.');
     process.exit(1);
   }
 
   const config  = getConfig();
-  const aizo = require('./aizo_bridge');
   aizo.configure({ aizo_binary: config.aizo_binary, aizo_db: config.aizo_db });
 
-  const session = new SessionLogger(config.sessions_dir);
+  const session  = new SessionLogger(config.sessions_dir);
   const registry = buildToolRegistry();
   const runtime  = new Runtime(registry, config, session);
 
@@ -125,18 +133,17 @@ async function main() {
   console.log('Ready. Type your message, /status, /task <desc>, /done, /reset, or /quit\n');
 
   const rl = readline.createInterface({
-    input: process.stdin,
+    input:  process.stdin,
     output: process.stdout,
     prompt: 'you> ',
   });
 
   rl.prompt();
 
-  rl.on('line', async (line) => {
+  rl.on('line', async (line: string) => {
     const input = line.trim();
     if (!input) { rl.prompt(); return; }
 
-    // Slash commands
     if (input === '/quit' || input === '/exit') {
       console.log('Goodbye.');
       rl.close();
@@ -151,9 +158,9 @@ async function main() {
 
     if (input.startsWith('/task ')) {
       const desc = input.slice(6).trim();
-      const id = runtime.memory.taskStack.push(desc);
+      const id   = runtime.memory.taskStack.push(desc);
       runtime.memory.activeContext = desc;
-      if (session) session.logTaskStart(id, desc);
+      session.logTaskStart(id, desc);
       console.log(`Task #${id} started: ${desc}`);
       rl.prompt();
       return;
@@ -165,7 +172,7 @@ async function main() {
       else {
         runtime.memory.taskStack.complete(task.id);
         runtime.emotion.processEvent({ type: 'TaskCompleted' });
-        if (session) session.logTaskComplete(task.id);
+        session.logTaskComplete(task.id);
         console.log(`Task #${task.id} completed.`);
       }
       rl.prompt();
@@ -179,26 +186,28 @@ async function main() {
       return;
     }
 
-    // Normal message
     try {
       process.stdout.write('connor> ');
       const response = await runtime.runTurn(input);
       console.log(response + '\n');
     } catch (err) {
-      console.error(`\nError: ${err.message}\n`);
+      console.error(`\nError: ${(err as Error).message}\n`);
     }
 
     rl.prompt();
   });
 
   rl.on('close', () => {
-    if (session) session.end(runtime.emotion.snapshot());
-    console.log('\nSession ended.');
-    process.exit(0);
+    session.end(runtime.emotion.snapshot());
+    console.log('\nSession ended. Extracting preferences from transcript...');
+    const transcriptPath = path.join(session.sessionDir, 'transcript.md');
+    let transcript = '';
+    try { transcript = fs.readFileSync(transcriptPath, 'utf8'); } catch { /* no transcript */ }
+    runtime.analyzeTranscript(transcript).finally(() => process.exit(0));
   });
 }
 
 main().catch(err => {
-  console.error('Fatal:', err.message);
+  console.error('Fatal:', (err as Error).message);
   process.exit(1);
 });

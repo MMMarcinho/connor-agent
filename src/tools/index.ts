@@ -1,23 +1,24 @@
-'use strict';
+import type { Tool, ToolResult, ToolPolicy } from '../types';
 
 const COMPLEX_TOOLS = new Set(['shell']);
-const MAX_OUTPUT = 8000; // characters before truncation
+const MAX_OUTPUT    = 8000;
 
-class ToolRegistry {
-  constructor() {
-    this.tools = new Map();
-  }
+export class ToolRegistry {
+  private tools = new Map<string, Tool>();
 
-  register(tool) {
+  register(tool: Tool): void {
     this.tools.set(tool.name, tool);
   }
 
-  get(name) { return this.tools.get(name) || null; }
+  get(name: string): Tool | null {
+    return this.tools.get(name) ?? null;
+  }
 
-  isComplex(name) { return COMPLEX_TOOLS.has(name); }
+  isComplex(name: string): boolean {
+    return COMPLEX_TOOLS.has(name);
+  }
 
-  // Returns array of tool definitions in Anthropic API format
-  schemaForPrompt(policy = {}) {
+  schemaForPrompt(policy: ToolPolicy = {}): object[] {
     return [...this.tools.values()]
       .filter(t => !policy.avoidComplex || !COMPLEX_TOOLS.has(t.name))
       .map(t => ({
@@ -28,7 +29,7 @@ class ToolRegistry {
           properties: Object.fromEntries(
             t.params.map(p => [p.name, {
               type: p.type,
-              description: p.desc || '',
+              description: p.desc ?? '',
               ...(p.enum ? { enum: p.enum } : {}),
             }])
           ),
@@ -37,22 +38,18 @@ class ToolRegistry {
       }));
   }
 
-  async execute(name, params) {
+  async execute(name: string, params: Record<string, unknown>): Promise<ToolResult> {
     const tool = this.tools.get(name);
-    if (!tool) {
-      return { exitCode: 1, stdout: '', stderr: `Unknown tool: ${name}` };
-    }
+    if (!tool) return { exitCode: 1, stdout: '', stderr: `Unknown tool: ${name}` };
+
     try {
       const result = await tool.handler(params);
-      // Truncate large outputs
-      if (result.stdout && result.stdout.length > MAX_OUTPUT) {
+      if (result.stdout.length > MAX_OUTPUT) {
         result.stdout = result.stdout.slice(0, MAX_OUTPUT) + `\n[... truncated at ${MAX_OUTPUT} chars]`;
       }
       return result;
     } catch (err) {
-      return { exitCode: 1, stdout: '', stderr: err.message };
+      return { exitCode: 1, stdout: '', stderr: (err as Error).message };
     }
   }
 }
-
-module.exports = { ToolRegistry };

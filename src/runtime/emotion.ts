@@ -1,25 +1,29 @@
-'use strict';
+import type {
+  EmotionSnapshot, EmotionEvent, EmotionDimension,
+  AdjustedThresholds, BiasedRecallResult, EmotionalTag, EmotionalContext,
+  AizoEntry,
+} from '../types';
+import type * as Aizo from '../aizo_bridge';
 
 // ── Emotion State ────────────────────────────────────────────────────────────
 
-class EmotionState {
-  constructor() {
-    this.energy = 1.0;
-    this.focus = 0.7;
-    this.frustration = 0.05;
-    this.novelty = 0.5;
-    this.confidence = 0.5;
+export class EmotionState {
+  energy      = 1.0;
+  focus       = 0.7;
+  frustration = 0.05;
+  novelty     = 0.5;
+  confidence  = 0.5;
+
+  private _clamp(v: number): number { return Math.max(0, Math.min(1, v)); }
+  private _apply(dim: EmotionDimension, delta: number): void {
+    this[dim] = this._clamp(this[dim] + delta);
   }
 
-  _clamp(v) { return Math.max(0, Math.min(1, v)); }
-  _apply(dim, delta) { this[dim] = this._clamp(this[dim] + delta); }
-
-  processEvent(event) {
-    const { type } = event;
-    switch (type) {
-      case 'LlmCallCompleted':     this._apply('energy', -0.03); break;
-      case 'SimpleToolCall':       this._apply('energy', -0.01); break;
-      case 'ComplexToolCall':      this._apply('energy', -0.05); break;
+  processEvent(event: EmotionEvent): void {
+    switch (event.type) {
+      case 'LlmCallCompleted':  this._apply('energy', -0.03); break;
+      case 'SimpleToolCall':    this._apply('energy', -0.01); break;
+      case 'ComplexToolCall':   this._apply('energy', -0.05); break;
       case 'ToolSuccess':
         this._apply('frustration', -0.10);
         this._apply('confidence',  +0.03);
@@ -27,13 +31,13 @@ class EmotionState {
       case 'ToolFailure':
         this._apply('frustration', +0.12);
         this._apply('confidence',  -0.10);
-        if ((event.consecutiveFailures || 0) >= 3) this._apply('frustration', +0.20);
+        if ((event.consecutiveFailures ?? 0) >= 3) this._apply('frustration', +0.20);
         break;
       case 'TaskCompleted':
         this._apply('frustration', -0.25);
         this._apply('confidence',  +0.10);
         break;
-      case 'TaskSwitched':         this._apply('focus', -0.10); break;
+      case 'TaskSwitched':             this._apply('focus', -0.10); break;
       case 'StepTowardGoalCompleted':
         this._apply('focus',      +0.05);
         this._apply('confidence', +0.02);
@@ -55,25 +59,27 @@ class EmotionState {
         this._apply('confidence', +0.08);
         break;
       case 'IdlePeriod':
-        this._apply('energy', (event.minutes || 1) * 0.04);
+        this._apply('energy', (event.minutes ?? 1) * 0.04);
         break;
-      case 'ReflectionCompleted':  this._apply('energy', +0.15); break;
+      case 'ReflectionCompleted':
+        this._apply('energy', +0.15);
+        break;
     }
   }
 
-  // 5% per minute natural decay toward baseline for Frustration and Novelty
-  naturalDecay(deltaMinutes) {
+  // 5% per minute natural decay toward baseline for frustration and novelty
+  naturalDecay(deltaMinutes: number): void {
     if (deltaMinutes <= 0) return;
     const rate = Math.pow(0.95, deltaMinutes);
     this.frustration = this._clamp(this.frustration * rate);
-    this.novelty = this._clamp(0.5 + (this.novelty - 0.5) * rate);
+    this.novelty     = this._clamp(0.5 + (this.novelty - 0.5) * rate);
   }
 
-  applyCorrection(delta, dimension) {
-    if (this[dimension] !== undefined) this._apply(dimension, delta);
+  applyCorrection(delta: number, dimension: EmotionDimension): void {
+    this._apply(dimension, delta);
   }
 
-  snapshot() {
+  snapshot(): EmotionSnapshot {
     return {
       energy: this.energy, focus: this.focus,
       frustration: this.frustration, novelty: this.novelty,
@@ -81,15 +87,14 @@ class EmotionState {
     };
   }
 
-  loadSnapshot(snap) {
-    if (!snap) return;
-    for (const k of ['energy', 'focus', 'frustration', 'novelty', 'confidence']) {
-      if (typeof snap[k] === 'number') this[k] = this._clamp(snap[k]);
+  loadSnapshot(snap: Partial<EmotionSnapshot>): void {
+    const dims: EmotionDimension[] = ['energy', 'focus', 'frustration', 'novelty', 'confidence'];
+    for (const k of dims) {
+      if (typeof snap[k] === 'number') this[k] = this._clamp(snap[k] as number);
     }
   }
 
-  // Carry-over from previous session: regress 50% toward defaults
-  static fromCarryOver(prev) {
+  static fromCarryOver(prev: EmotionSnapshot): EmotionState {
     const s = new EmotionState();
     if (!prev) return s;
     s.energy      = (prev.energy      + s.energy)      / 2;
@@ -100,8 +105,8 @@ class EmotionState {
     return s;
   }
 
-  display() {
-    const bar = (v) => '█'.repeat(Math.round(v * 10)).padEnd(10, '░');
+  display(): string {
+    const bar = (v: number) => '█'.repeat(Math.round(v * 10)).padEnd(10, '░');
     return [
       `  energy      ${bar(this.energy)} ${(this.energy * 100).toFixed(0)}%`,
       `  focus       ${bar(this.focus)} ${(this.focus * 100).toFixed(0)}%`,
@@ -116,16 +121,16 @@ class EmotionState {
 
 const POSITIVE_KW = [
   'perfect', 'exactly', 'great', 'love this', 'thank', 'good job',
-  'nice', 'works', 'awesome', 'much better', 'that\'s it', 'correct',
+  'nice', 'works', 'awesome', 'much better', "that's it", 'correct',
 ];
 const NEGATIVE_KW = [
   "no don't", 'wrong', 'bad', 'stop', 'hate this', 'not what i',
-  'incorrect', 'nope', "doesn't work", 'revert', 'undo', 'that\'s wrong',
+  'incorrect', 'nope', "doesn't work", 'revert', 'undo', "that's wrong",
 ];
 
-function detectL1Events(message) {
+export function detectL1Events(message: string): EmotionEvent[] {
   const lower = message.toLowerCase();
-  const events = [];
+  const events: EmotionEvent[] = [];
   if (POSITIVE_KW.some(kw => lower.includes(kw))) events.push({ type: 'UserPositiveKeyword' });
   if (NEGATIVE_KW.some(kw => lower.includes(kw))) events.push({ type: 'UserNegativeKeyword' });
   return events;
@@ -133,24 +138,25 @@ function detectL1Events(message) {
 
 // ── Emotional Trajectory ─────────────────────────────────────────────────────
 
-class EmotionTrajectory {
+export class EmotionTrajectory {
+  private window:     EmotionSnapshot[] = [];
+  private windowSize: number;
+
   constructor(windowSize = 5) {
-    this.window = [];
     this.windowSize = windowSize;
   }
 
-  push(snapshot) {
+  push(snapshot: EmotionSnapshot): void {
     if (this.window.length >= this.windowSize) this.window.shift();
     this.window.push(snapshot);
   }
 
-  // Linear regression slope over window, normalized to [-1, 1]
-  _trend(extract) {
+  private _trend(extract: (s: EmotionSnapshot) => number): number {
     const vals = this.window.map(extract);
-    const n = vals.length;
+    const n    = vals.length;
     if (n < 2) return 0;
-    const sx = (n * (n - 1)) / 2;
-    const sy = vals.reduce((a, b) => a + b, 0);
+    const sx  = (n * (n - 1)) / 2;
+    const sy  = vals.reduce((a, b) => a + b, 0);
     const sxy = vals.reduce((s, y, i) => s + i * y, 0);
     const sxx = vals.reduce((s, _, i) => s + i * i, 0);
     const denom = n * sxx - sx * sx;
@@ -158,16 +164,16 @@ class EmotionTrajectory {
     return Math.max(-1, Math.min(1, (n * sxy - sx * sy) / denom));
   }
 
-  frustrationTrend() { return this._trend(s => s.frustration); }
-  confidenceTrend()  { return this._trend(s => s.confidence); }
-  noveltyTrend()     { return this._trend(s => s.novelty); }
-  energyTrend()      { return this._trend(s => s.energy); }
+  frustrationTrend(): number { return this._trend(s => s.frustration); }
+  confidenceTrend():  number { return this._trend(s => s.confidence); }
+  noveltyTrend():     number { return this._trend(s => s.novelty); }
+  energyTrend():      number { return this._trend(s => s.energy); }
 
-  isFlowState() {
+  isFlowState(): boolean {
     return this.noveltyTrend() > 0.3 && this.confidenceTrend() > 0.3;
   }
 
-  adjustedThresholds() {
+  adjustedThresholds(): AdjustedThresholds {
     return {
       frustrationCaution: 0.6 - Math.max(0, this.frustrationTrend()) * 0.1,
       confidenceLow:      0.3 + Math.max(0, -this.confidenceTrend()) * 0.1,
@@ -178,81 +184,94 @@ class EmotionTrajectory {
 
 // ── Emotion-Biased Recall ────────────────────────────────────────────────────
 
-function biasRecallQuery(baseQuery, emotion) {
-  let query = baseQuery;
-  let minWeight = null;
-  let maxResults = null;
+interface BiasParams {
+  query:           string;
+  minWeight:       number | null;
+  maxResults:      number | null;
+  includeTaboo:    boolean;
+  includeLowWeight: boolean;
+}
+
+function biasRecallQuery(baseQuery: string, emotion: EmotionSnapshot): BiasParams {
+  let query        = baseQuery;
+  let minWeight    = null;
+  let maxResults   = null;
   let includeTaboo = false;
-  let includeLowWeight = false;
+  const includeLowWeight = emotion.novelty > 0.7;
 
   if (emotion.frustration > 0.6) {
-    query = `${baseQuery} safe reliable`;
+    query        = `${baseQuery} safe reliable`;
     includeTaboo = true;
   }
-  if (emotion.novelty > 0.7) includeLowWeight = true;
-  if (emotion.confidence < 0.3) minWeight = 7.0;
-  if (emotion.energy < 0.3) maxResults = 5;
+  if (emotion.confidence < 0.3) minWeight  = 7.0;
+  if (emotion.energy < 0.3)     maxResults = 5;
 
   return { query, minWeight, maxResults, includeTaboo, includeLowWeight };
 }
 
-async function recallBiased(aizo, baseQuery, emotion) {
+export async function recallBiased(
+  aizo: typeof Aizo,
+  baseQuery: string,
+  emotion: EmotionSnapshot,
+): Promise<BiasedRecallResult> {
   const params = biasRecallQuery(baseQuery, emotion);
-  let results = await aizo.recall(params.query);
+  let results: AizoEntry[] = await aizo.recall(params.query);
 
   if (params.includeTaboo) {
     const taboo = await aizo.recall(params.query, 'taboo');
     results = [...results, ...taboo];
   }
   if (params.minWeight !== null) {
-    results = results.filter(e => (e.effective_weight || e.score || 0) >= params.minWeight);
+    results = results.filter(e => (e.effective_weight ?? e.score ?? 0) >= params.minWeight!);
   }
   if (params.maxResults !== null) {
     results = results.slice(0, params.maxResults);
   }
 
   const strongMatchCount = results.filter(
-    e => (e.effective_weight || e.score || 0) >= 7
+    e => (e.effective_weight ?? e.score ?? 0) >= 7
   ).length;
 
   return {
-    entries: results,
-    isEmpty: results.length === 0,
+    entries:      results,
+    isEmpty:      results.length === 0,
     isStrongMatch: strongMatchCount >= 5,
   };
 }
 
 // ── Emotional Memory Write-back ──────────────────────────────────────────────
 
-function evaluateEmotionalWrite(current, prev, context, consecutiveFailures) {
-  const tags = [];
+export function evaluateEmotionalWrite(
+  current: EmotionSnapshot,
+  prev:    EmotionSnapshot,
+  context: EmotionalContext,
+  consecutiveFailures: number,
+): EmotionalTag[] {
+  const tags: EmotionalTag[] = [];
 
-  // Frustration threshold crossed this turn (rising edge)
   if (current.frustration > 0.7 && prev.frustration <= 0.7 && context.toolName) {
     tags.push({
-      item: `${context.toolName} emotionally taxing`,
-      reason: `frustration crossed 0.7 during ${context.toolName}`,
-      score: 3.0,
+      item:     `${context.toolName} emotionally taxing`,
+      reason:   `frustration crossed 0.7 during ${context.toolName}`,
+      score:    3.0,
       keywords: [context.toolName, 'frustration', 'taxing'],
     });
   }
 
-  // 3+ consecutive failures with same tool
   if (consecutiveFailures >= 3 && context.toolName) {
     tags.push({
-      item: `${context.toolName} repeated failure`,
-      reason: `${consecutiveFailures} consecutive failures with ${context.toolName}`,
-      score: 2.0,
+      item:     `${context.toolName} repeated failure`,
+      reason:   `${consecutiveFailures} consecutive failures with ${context.toolName}`,
+      score:    2.0,
       keywords: [context.toolName, 'failure', 'pattern'],
     });
   }
 
-  // High confidence at task completion
   if (current.confidence > 0.8 && prev.confidence <= 0.8 && context.taskType) {
     tags.push({
-      item: `${context.taskType} confidence builder`,
-      reason: `confidence ${current.confidence.toFixed(2)} reached during ${context.taskType}`,
-      score: 7.0,
+      item:     `${context.taskType} confidence builder`,
+      reason:   `confidence ${current.confidence.toFixed(2)} reached during ${context.taskType}`,
+      score:    7.0,
       keywords: [context.taskType, 'confidence', 'success'],
     });
   }
@@ -260,7 +279,10 @@ function evaluateEmotionalWrite(current, prev, context, consecutiveFailures) {
   return tags;
 }
 
-async function writeEmotionalTags(aizo, tags) {
+export async function writeEmotionalTags(
+  aizo: typeof Aizo,
+  tags: EmotionalTag[],
+): Promise<void> {
   for (const tag of tags) {
     await aizo.add(tag.item, tag.reason, tag.score, tag.keywords);
   }
@@ -268,25 +290,16 @@ async function writeEmotionalTags(aizo, tags) {
 
 // ── Prompt Modifiers ─────────────────────────────────────────────────────────
 
-function promptModifiers(emotion, thresholds) {
-  const t = thresholds || { frustrationCaution: 0.6, confidenceLow: 0.3, flowState: false };
-  if (t.flowState) return [];
-  const mods = [];
-  if (emotion.energy < 0.3)         mods.push('Be concise. Skip explanations unless critical.');
-  if (emotion.frustration > t.frustrationCaution) mods.push('If uncertain about anything, ask for clarification first.');
-  if (emotion.novelty > 0.7)        mods.push('Consider whether a better approach exists before executing.');
-  if (emotion.confidence < t.confidenceLow) mods.push('Double-check every assumption before acting.');
-  if (emotion.focus < 0.4)          mods.push('Re-read the current goal before taking each action.');
+export function promptModifiers(
+  emotion: EmotionSnapshot,
+  thresholds: AdjustedThresholds,
+): string[] {
+  if (thresholds.flowState) return [];
+  const mods: string[] = [];
+  if (emotion.energy < 0.3)                         mods.push('Be concise. Skip explanations unless critical.');
+  if (emotion.frustration > thresholds.frustrationCaution) mods.push('If uncertain about anything, ask for clarification first.');
+  if (emotion.novelty > 0.7)                        mods.push('Consider whether a better approach exists before executing.');
+  if (emotion.confidence < thresholds.confidenceLow) mods.push('Double-check every assumption before acting.');
+  if (emotion.focus < 0.4)                          mods.push('Re-read the current goal before taking each action.');
   return mods;
 }
-
-module.exports = {
-  EmotionState,
-  EmotionTrajectory,
-  detectL1Events,
-  biasRecallQuery,
-  recallBiased,
-  evaluateEmotionalWrite,
-  writeEmotionalTags,
-  promptModifiers,
-};
