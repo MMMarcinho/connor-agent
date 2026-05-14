@@ -230,7 +230,6 @@ function evaluateEmotionalWrite(current, prev, context, consecutiveFailures) {
   // Frustration threshold crossed this turn (rising edge)
   if (current.frustration > 0.7 && prev.frustration <= 0.7 && context.toolName) {
     tags.push({
-      category: 'aversion',
       item: `${context.toolName} emotionally taxing`,
       reason: `frustration crossed 0.7 during ${context.toolName}`,
       score: 3.0,
@@ -241,7 +240,6 @@ function evaluateEmotionalWrite(current, prev, context, consecutiveFailures) {
   // 3+ consecutive failures with same tool
   if (consecutiveFailures >= 3 && context.toolName) {
     tags.push({
-      category: 'aversion',
       item: `${context.toolName} repeated failure`,
       reason: `${consecutiveFailures} consecutive failures with ${context.toolName}`,
       score: 2.0,
@@ -252,7 +250,6 @@ function evaluateEmotionalWrite(current, prev, context, consecutiveFailures) {
   // High confidence at task completion
   if (current.confidence > 0.8 && prev.confidence <= 0.8 && context.taskType) {
     tags.push({
-      category: 'preference',
       item: `${context.taskType} confidence builder`,
       reason: `confidence ${current.confidence.toFixed(2)} reached during ${context.taskType}`,
       score: 7.0,
@@ -265,7 +262,7 @@ function evaluateEmotionalWrite(current, prev, context, consecutiveFailures) {
 
 async function writeEmotionalTags(aizo, tags) {
   for (const tag of tags) {
-    await aizo.add(tag.category, tag.item, tag.reason, tag.score, tag.keywords);
+    await aizo.add(tag.item, tag.reason, tag.score, tag.keywords);
   }
 }
 

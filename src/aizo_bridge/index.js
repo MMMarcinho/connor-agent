@@ -30,30 +30,6 @@ function resolveAizoBin(override) {
   return process.env.AIZO_BIN || 'aizo'; // legacy env var + system fallback
 }
 
-// ── Category → score mapping ──────────────────────────────────────────────────
-//
-// aizo v0.3 no longer stores a "category" field. The --type filter on recall/top
-// is purely a score-range alias. We map legacy category names to representative
-// scores so existing call-sites (reflection, emotion write-back, etc.) keep working.
-//
-//   taboo      →  0.5   (0 – 1.5)
-//   aversion   →  2.0   (1.6 – 4)
-//   habit      →  5.0   (4 – 6.5)
-//   style      →  7.0   (6.5 – 10, lower end)
-//   preference →  8.0   (7 – 10)
-
-const CATEGORY_SCORE = {
-  taboo:      0.5,
-  aversion:   2.0,
-  habit:      5.0,
-  style:      7.0,
-  preference: 8.0,
-};
-
-function categoryToScore(category) {
-  return CATEGORY_SCORE[category] ?? 5.0;
-}
-
 // ── Timeouts (ms) ─────────────────────────────────────────────────────────────
 
 const TIMEOUTS = {
@@ -129,12 +105,11 @@ async function recall(query = '', category = null, limit = 20) {
   return parseJson(out, []);
 }
 
-// add(category, item, reason, score, keywords)
-//   category  – legacy name; converted to a representative score if score is null
-//   score     – explicit 0–10 override (takes priority over category mapping)
-//   keywords  – tagged via a separate `aizo tag` call after add
-async function add(category, item, reason, score = null, keywords = []) {
-  const s = score !== null ? score : categoryToScore(category);
+// add(item, reason, score, keywords)
+//   score    – 0–10; use the scoring table: 0=taboo, 2=aversion, 5=habit, 7=style, 8=preference
+//   keywords – tagged via a separate `aizo tag` call after add
+async function add(item, reason, score = 5, keywords = []) {
+  const s = score ?? 5;
 
   // Step 1: add the entry
   const addArgs = ['add', item, reason || '', '--score', String(s)];
