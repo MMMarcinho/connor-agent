@@ -126,7 +126,7 @@ async function main(): Promise<void> {
   const registry = buildToolRegistry();
   const runtime  = new Runtime(registry, mainLLM, reflectLLM, config, session);
 
-  console.log('kokoro initializing...');
+  console.log('cortex initializing...');
   await runtime.initialize();
   console.log(`Session: ${session.sessionId}`);
   console.log('Ready. Type your message, /status, /task <desc>, /done, /reset, or /quit\n');
@@ -186,7 +186,7 @@ async function main(): Promise<void> {
     }
 
     try {
-      process.stdout.write('kokoro> ');
+      process.stdout.write('cortex> ');
       const response = await runtime.runTurn(input);
       console.log(response + '\n');
     } catch (err) {

@@ -1,5 +1,5 @@
 {
-  "name": "connor-agent",
+  "name": "cortex-agent",
   "version": "0.1.0",
   "description": "Cyber bionic agent with human-like cognition: unified memory, dynamic emotions, memory-driven tool learning",
   "main": "dist/index.js",

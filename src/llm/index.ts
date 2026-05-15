@@ -10,7 +10,7 @@ export * from './types';
 //
 // Loaded from (in priority order):
 //   ./.llm.config.json       — project-local override
-//   ~/.kokoro/llm.config.json — global user config
+//   ~/.cortex/llm.config.json — global user config
 //
 // Example:
 //   {
@@ -27,7 +27,7 @@ interface LLMConfigFile {
 const DEFAULTS: { main: LLMProviderConfig; reflection: LLMProviderConfig } = {
   main: {
     provider: 'anthropic',
-    model:    process.env['CONNOR_MODEL'] ?? 'claude-sonnet-4-6',
+    model:    process.env['CORTEX_MODEL'] ?? 'claude-sonnet-4-6',
   },
   reflection: {
     provider: 'anthropic',
@@ -37,7 +37,7 @@ const DEFAULTS: { main: LLMProviderConfig; reflection: LLMProviderConfig } = {
 
 function loadLLMConfigFile(): LLMConfigFile {
   const locations = [
-    path.join(process.env['HOME'] ?? '~', '.kokoro', 'llm.config.json'),
+    path.join(process.env['HOME'] ?? '~', '.cortex', 'llm.config.json'),
     path.join(process.cwd(), 'llm.config.json'),
   ];
   let merged: LLMConfigFile = {};
