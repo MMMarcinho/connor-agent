@@ -126,7 +126,7 @@ async function main(): Promise<void> {
   const registry = buildToolRegistry();
   const runtime  = new Runtime(registry, mainLLM, reflectLLM, config, session);
 
-  console.log('connor-agent initializing...');
+  console.log('kokoro initializing...');
   await runtime.initialize();
   console.log(`Session: ${session.sessionId}`);
   console.log('Ready. Type your message, /status, /task <desc>, /done, /reset, or /quit\n');
@@ -186,7 +186,7 @@ async function main(): Promise<void> {
     }
 
     try {
-      process.stdout.write('connor> ');
+      process.stdout.write('kokoro> ');
       const response = await runtime.runTurn(input);
       console.log(response + '\n');
     } catch (err) {

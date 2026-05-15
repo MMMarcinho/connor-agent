@@ -56,7 +56,7 @@ export class SessionLogger {
     this._appendTranscript(
       `## Turn ${this.turnCount} — ${ts}\n\n` +
       `**User:** ${userMessage}\n\n` +
-      `**Connor:** ${assistantResponse}\n\n` +
+      `**Kokoro:** ${assistantResponse}\n\n` +
       (bar ? `*Emotion: ${bar}*\n\n` : '') +
       `---\n\n`
     );
