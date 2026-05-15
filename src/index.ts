@@ -8,8 +8,8 @@ import { Runtime } from './runtime';
 import { getConfig } from './config';
 import { SessionLogger } from './session';
 import * as aizo from './aizo_bridge';
-import { EmotionState } from './runtime/emotion';
-import { EmotionTrajectory } from './runtime/emotion';
+import { EmotionState, EmotionTrajectory } from './runtime/emotion';
+import { createLLMClients } from './llm';
 
 // ── Built-in tools ────────────────────────────────────────────────────────────
 
@@ -115,17 +115,16 @@ async function main(): Promise<void> {
     return;
   }
 
-  if (!process.env['ANTHROPIC_API_KEY']) {
-    console.error('Error: ANTHROPIC_API_KEY environment variable not set.');
-    process.exit(1);
-  }
+  // API key is validated per-provider in llm.config.json or via env vars.
+  // We skip the hard check here so users can run with Ollama (no key needed).
 
   const config  = getConfig();
   aizo.configure({ aizo_binary: config.aizo_binary, aizo_db: config.aizo_db });
 
+  const { main: mainLLM, reflection: reflectLLM } = createLLMClients();
   const session  = new SessionLogger(config.sessions_dir);
   const registry = buildToolRegistry();
-  const runtime  = new Runtime(registry, config, session);
+  const runtime  = new Runtime(registry, mainLLM, reflectLLM, config, session);
 
   console.log('connor-agent initializing...');
   await runtime.initialize();
