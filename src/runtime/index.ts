@@ -48,7 +48,7 @@ export class Runtime {
   ) {
     this.config     = config;
     this.session    = sessionLogger;
-    this.maxTokens  = config.max_tokens ?? Number(process.env['CONNOR_MAX_TOKENS'] ?? 4096);
+    this.maxTokens  = config.max_tokens ?? Number(process.env['CORTEX_MAX_TOKENS'] ?? 4096);
 
     this.llm             = llmClient;
     this.reflectLLM      = reflectClient;
